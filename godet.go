@@ -289,10 +289,10 @@ func Connect(port string, verbose bool, options ...ConnectOption) (*RemoteDebugg
 	return remote, nil
 }
 
-func (remote *RemoteDebugger) setReadDeadline(t time.Time) error {
+func (remote *RemoteDebugger) SetReadDeadline(t time.Time) error {
 	return remote.ws.SetReadDeadline(t)
 }
-func (remote *RemoteDebugger) setWriteDeadline(t time.Time) error {
+func (remote *RemoteDebugger) SetWriteDeadline(t time.Time) error {
 	return remote.ws.SetWriteDeadline(t)
 }
 
