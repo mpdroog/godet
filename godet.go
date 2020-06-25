@@ -288,6 +288,13 @@ func Connect(port string, verbose bool, options ...ConnectOption) (*RemoteDebugg
 	return remote, nil
 }
 
+func (remote *RemoteDebugger) setReadDeadline(t time.Time) error {
+	return remote.ws.SetReadDeadline(t)
+}
+func (remote *RemoteDebugger) setWriteDeadline(t time.Time) error {
+	return remote.ws.SetWriteDeadline(t)
+}
+
 func (remote *RemoteDebugger) connectWs(tab *Tab) error {
 	if tab == nil || len(tab.WsURL) == 0 {
 		tabs, err := remote.TabList("page")
