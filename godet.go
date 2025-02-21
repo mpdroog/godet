@@ -212,6 +212,7 @@ type RemoteDebugger struct {
 	requests  chan Params
 	responses map[int]chan json.RawMessage
 	callbacks map[string]EventCallback
+	domains   map[string]bool
 	events    chan wsMessage
 }
 
@@ -270,6 +271,7 @@ func Connect(port string, verbose bool, options ...ConnectOption) (*RemoteDebugg
 		requests:  make(chan Params),
 		responses: map[int]chan json.RawMessage{},
 		callbacks: map[string]EventCallback{},
+		domains:   map[string]bool{},
 		events:    make(chan wsMessage, 256),
 		closed:    make(chan bool),
 		verbose:   verbose,
@@ -641,6 +643,12 @@ func (remote *RemoteDebugger) ActivateTab(tab *Tab) error {
 
 	if err == nil {
 		err = remote.connectWs(tab)
+
+		if err == nil {
+			for domain, state := range remote.domains {
+				remote.DomainEvents(domain, state)
+			}
+		}
 	}
 
 	return err
@@ -660,7 +668,7 @@ func (remote *RemoteDebugger) NewTab(url string) (*Tab, error) {
 		path += "?" + url
 	}
 
-	resp, err := responseError(remote.http.Do(remote.http.Request("GET", path, nil, nil)))
+	resp, err := responseError(remote.http.Do(remote.http.Request("PUT", path, nil, nil)))
 	if err != nil {
 		return nil, err
 	}
@@ -678,6 +686,8 @@ func (remote *RemoteDebugger) NewTab(url string) (*Tab, error) {
 }
 
 // GetDomains lists the available DevTools domains.
+//
+// Deprecated: The Schema domain is now deprecated.
 func (remote *RemoteDebugger) GetDomains() ([]Domain, error) {
 	res, err := remote.sendRawReplyRequest("Schema.getDomains", nil)
 	if err != nil {
@@ -698,9 +708,42 @@ func (remote *RemoteDebugger) GetDomains() ([]Domain, error) {
 
 // Navigate navigates to the specified URL.
 func (remote *RemoteDebugger) Navigate(url string) (string, error) {
-	res, err := remote.SendRequest("Page.navigate", Params{
+	return remote.NavigateTransition(url, NoTransition)
+}
+
+type TransitionType string
+
+const (
+	NoTransition = TransitionType("")
+	Reload       = TransitionType("reload")
+
+/*
+"link",
+"typed",
+"address_bar",
+"auto_bookmark",
+"auto_subframe",
+"manual_subframe",
+"generated",
+"auto_toplevel",
+"form_submit",
+"reload",
+"keyword",
+"keyword_generated",
+"other"
+*/
+)
+
+func (remote *RemoteDebugger) NavigateTransition(url string, trans TransitionType) (string, error) {
+	params := Params{
 		"url": url,
-	})
+	}
+
+	if trans != NoTransition {
+		params["transitionType"] = string(trans)
+	}
+
+	res, err := remote.SendRequest("Page.navigate", params)
 	if err != nil {
 		return "", err
 	}
@@ -1021,7 +1064,7 @@ func (remote *RemoteDebugger) GetAllCookies() ([]Cookie, error) {
 	return cookies.Cookies, nil
 }
 
-//Set browser cookies
+// Set browser cookies.
 func (remote *RemoteDebugger) SetCookies(cookies []Cookie) error {
 	params := Params{}
 	params["cookies"] = cookies
@@ -1030,7 +1073,31 @@ func (remote *RemoteDebugger) SetCookies(cookies []Cookie) error {
 	return err
 }
 
-//Set browser cookie
+// Deletes browser cookies with matching name and url or domain/path pair.
+//
+// Parameters:
+//
+// name string: Name of the cookies to remove.
+// url string: If specified, deletes all the cookies with the given name where domain and path match provided URL.
+// domain string: If specified, deletes only cookies with the exact domain.
+// path string: If specified, deletes only cookies with the exact path.
+func (remote *RemoteDebugger) DeleteCookies(name, url, domain, path string) error {
+	params := Params{}
+	params["name"] = name
+	if url != "" {
+		params["url"] = url
+	}
+	if domain != "" {
+		params["domain"] = domain
+	}
+	if path != "" {
+		params["path"] = path
+	}
+	_, err := remote.SendRequest("Network.deleteCookies", params)
+	return err
+}
+
+// Set browser cookie
 func (remote *RemoteDebugger) SetCookie(cookie Cookie) bool {
 	params := Params{}
 	params["name"] = cookie.Name
@@ -1054,12 +1121,12 @@ func (remote *RemoteDebugger) SetCookie(cookie Cookie) bool {
 		params["expires"] = cookie.Expires
 	}
 
-	res, err := remote.SendRequest("Network.setCookies", params)
+	_, err := remote.SendRequest("Network.setCookies", params)
 	if err != nil {
 		return false
 	}
 
-	return res["success"].(bool)
+	return true
 }
 
 type ResourceType string
@@ -1108,6 +1175,8 @@ type FetchRequestPattern struct {
 
 // SetRequestInterception sets the requests to intercept that match the provided patterns
 // and optionally resource types.
+//
+// Deprecated: use EnableRequestPaused instead.
 func (remote *RemoteDebugger) SetRequestInterception(patterns ...RequestPattern) error {
 	_, err := remote.SendRequest("Network.setRequestInterception", Params{
 		"patterns": patterns,
@@ -1132,12 +1201,15 @@ func (remote *RemoteDebugger) EnableRequestInterception(enabled bool) error {
 // event will be sent with the same InterceptionId.
 //
 // Parameters:
-//  errorReason ErrorReason - if set this causes the request to fail with the given reason.
-//  rawResponse string - if set the requests completes using with the provided base64 encoded raw response, including HTTP status line and headers etc...
-//  url string - if set the request url will be modified in a way that's not observable by page.
-//  method string - if set this allows the request method to be overridden.
-//  postData string - if set this allows postData to be set.
-//  headers Headers - if set this allows the request headers to be changed.
+//
+//	errorReason ErrorReason - if set this causes the request to fail with the given reason.
+//	rawResponse string - if set the requests completes using with the provided base64 encoded raw response, including HTTP status line and headers etc...
+//	url string - if set the request url will be modified in a way that's not observable by page.
+//	method string - if set this allows the request method to be overridden.
+//	postData string - if set this allows postData to be set.
+//	headers Headers - if set this allows the request headers to be changed.
+//
+// Deprecated: use ContinueRequest, FulfillRequest and FailRequest instead.
 func (remote *RemoteDebugger) ContinueInterceptedRequest(interceptionID string,
 	errorReason ErrorReason,
 	rawResponse string,
@@ -1200,10 +1272,11 @@ func (remote *RemoteDebugger) EnableRequestPaused(enable bool, patterns ...Fetch
 // or completes it with the provided response bytes.
 //
 // Parameters:
-//  url string - if set the request url will be modified in a way that's not observable by page.
-//  method string - if set this allows the request method to be overridden.
-//  postData string - if set this allows postData to be set.
-//  headers Headers - if set this allows the request headers to be changed.
+//
+//	url string - if set the request url will be modified in a way that's not observable by page.
+//	method string - if set this allows the request method to be overridden.
+//	postData string - if set this allows postData to be set.
+//	headers Headers - if set this allows the request headers to be changed.
 func (remote *RemoteDebugger) ContinueRequest(requestID string,
 	url string,
 	method string,
@@ -1240,23 +1313,32 @@ func (remote *RemoteDebugger) FailRequest(requestID string, errorReason ErrorRea
 	return err
 }
 
-// FullfillRequest provides a response to the request.
-func (remote *RemoteDebugger) FullfillRequest(requestID string, responseCode int, responsePhrase string, headers map[string]string, body []byte) error {
+// FulfillRequest provides a response to the request.
+func (remote *RemoteDebugger) FulfillRequest(requestID string, responseCode int, responsePhrase string, headers map[string]string, body []byte) error {
 	params := Params{
-		"requestId":       requestID,
-		"responseCode":    responseCode,
-		"responseHeaders": headers,
+		"requestId":    requestID,
+		"responseCode": responseCode,
 	}
 
 	if responsePhrase != "" {
 		params["responsePhrase"] = responsePhrase
 	}
 
-	if body != nil {
+	if len(headers) > 0 {
+		var hlist = []map[string]string{}
+
+		for k, v := range headers {
+			hlist = append(hlist, map[string]string{"name": k, "value": v})
+		}
+
+		params["responseHeaders"] = hlist
+	}
+
+	if len(body) > 0 {
 		params["body"] = body
 	}
 
-	_, err := remote.SendRequest("Fetch.fullfillRequest", params)
+	_, err := remote.SendRequest("Fetch.fulfillRequest", params)
 	return err
 }
 
@@ -1394,6 +1476,8 @@ func (remote *RemoteDebugger) GetComputedStyleForNode(nodeID int) (map[string]in
 // SetVisibleSize resizes the frame/viewport of the page.
 // Note that this does not affect the frame's container (e.g. browser window).
 // Can be used to produce screenshots of the specified size.
+//
+// Deprecated: Emulation.setVisibleSize is now deprecated.
 func (remote *RemoteDebugger) SetVisibleSize(width, height int) error {
 	_, err := remote.SendRequest("Emulation.setVisibleSize", Params{
 		"width":  float64(width),
@@ -1757,7 +1841,7 @@ func (remote *RemoteDebugger) GetPreciseCoverage(precise bool) ([]interface{}, e
 	if res == nil || err != nil {
 		return nil, err
 	}
-	log.Println(res)
+	//log.Println(res)
 	return res["result"].([]interface{}), nil
 }
 
@@ -1774,8 +1858,10 @@ func (remote *RemoteDebugger) DomainEvents(domain string, enable bool) error {
 	method := domain
 
 	if enable {
+		remote.domains[method] = true
 		method += ".enable"
 	} else {
+		delete(remote.domains, method)
 		method += ".disable"
 	}
 
@@ -1814,6 +1900,52 @@ func (remote *RemoteDebugger) NetworkEvents(enable bool) error {
 	return remote.DomainEvents("Network", enable)
 }
 
+// TargetEvents enables Target events listening.
+func (remote *RemoteDebugger) TargetEvents(enable bool) error {
+	return remote.DomainEvents("Target", enable)
+}
+
+// Retrieves a list of available targets.
+func (remote *RemoteDebugger) GetTargets() (map[string]interface{}, error) {
+	resp, err := remote.SendRequest("Target.getTargets", Params{})
+
+	return resp, err
+}
+
+// Controls whether to discover available targets and notify via
+// `targetCreated/targetInfoChanged/targetDestroyed` events."
+func (remote *RemoteDebugger) SetDiscoverTargets(discover bool) error {
+	_, err := remote.SendRequest("Target.setDiscoverTargets", Params{
+		"discover": discover,
+	})
+	return err
+}
+
+// Controls whether to automatically attach to new targets which are considered to be related to
+// this one. When turned on, attaches to all existing related targets as well. When turned off,
+// automatically detaches from all currently attached targets.
+// This also clears all targets added by `autoAttachRelated` from the list of targets to watch
+// for creation of related targets.",
+func (remote *RemoteDebugger) SetAutoAttach(autoAttach bool) error {
+	_, err := remote.SendRequest("Target.setAutoAttach", Params{
+		"autoAttach": autoAttach,
+	})
+	return err
+}
+
+// Attaches to the target with given id.
+func (remote *RemoteDebugger) AttachToTarget(targetId string) (string, error) {
+	res, err := remote.SendRequest("Target.attachToTarget", Params{
+		"targetId": targetId,
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	return res["sessionId"].(string), nil
+}
+
 // RuntimeEvents enables Runtime events listening.
 func (remote *RemoteDebugger) RuntimeEvents(enable bool) error {
 	return remote.DomainEvents("Runtime", enable)
@@ -1822,6 +1954,78 @@ func (remote *RemoteDebugger) RuntimeEvents(enable bool) error {
 // LogEvents enables Log events listening.
 func (remote *RemoteDebugger) LogEvents(enable bool) error {
 	return remote.DomainEvents("Log", enable)
+}
+
+// DebuggerEvents enables DebugLog events listening.
+func (remote *RemoteDebugger) DebuggerEvents(enable bool) error {
+	return remote.DomainEvents("Debugger", enable)
+}
+
+func (remote *RemoteDebugger) DebuggerPause() error {
+	_, err := remote.SendRequest("Debugger.pause", nil)
+	return err
+}
+
+func (remote *RemoteDebugger) DebuggerResume(terminateOnResume bool) error {
+	_, err := remote.SendRequest("Debugger.resume", Params{
+		"terminateOnResume": terminateOnResume,
+	})
+	return err
+}
+
+func (remote *RemoteDebugger) DebuggerSkipAllPauses(skip bool) error {
+	_, err := remote.SendRequest("Debugger.setSkipAllPauses", Params{
+		"skip": skip,
+	})
+	return err
+}
+
+func (remote *RemoteDebugger) DebuggerSetBreakpointsActive(active bool) error {
+	_, err := remote.SendRequest("Debugger.setBreakpointsActive", Params{
+		"active": active,
+	})
+	return err
+}
+
+func (remote *RemoteDebugger) GetScriptSource(id string) (string, error) {
+	res, err := remote.SendRequest("Debugger.getScriptSource", Params{
+		"scriptId": id,
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	// should check for bytecode (wasm)
+	ss := res["scriptSource"]
+	if ss == nil {
+		return "", nil
+	}
+
+	return ss.(string), nil
+}
+
+func (remote *RemoteDebugger) SetScriptSource(id, source string) error {
+	res, err := remote.SendRequest("Debugger.setScriptSource", Params{
+		"scriptId":     id,
+		"scriptSource": source,
+	})
+
+	if err != nil {
+		return err
+	}
+
+	if res == nil {
+		//log.Println("SetScriptSource: NO RESPONSE")
+		return nil
+	}
+
+	status := res["status"].(string)
+	if status == "Ok" {
+		return nil
+	}
+
+	return errors.New(status)
 }
 
 // ProfilerEvents enables Profiler events listening.
